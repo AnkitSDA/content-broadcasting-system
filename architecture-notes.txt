@@ -1,0 +1,75 @@
+CONTENT BROADCASTING SYSTEM - ARCHITECTURE NOTES
+=================================================
+
+1. AUTHENTICATION & RBAC FLOW
+- JWT used for stateless authentication
+- On login → JWT generated with { id, email, role, name }
+- Sent as: Authorization: Bearer <token>
+- auth.middleware.js verifies JWT on every protected route
+- rbac.middleware.js checks req.user.role against allowed roles
+- Passwords hashed with bcrypt (10 salt rounds)
+
+2. SUBJECT-BASED SYSTEM DESIGN
+- content_slots table maps (subject + teacher_id) to a unique slot
+- content_schedule maps each content to a slot with rotation_order + duration
+- Each teacher's subjects have independent rotation queues
+- Subject values normalized to lowercase
+
+3. UPLOAD HANDLING
+- Multer handles multipart/form-data
+- Validates: MIME type, extension, file size (max 10MB)
+- Files stored in /uploads/ with unique names: timestamp-userId.ext
+- Served via /uploads/ static route
+
+4. APPROVAL WORKFLOW
+Content lifecycle: uploaded → pending → approved / rejected
+- Teacher uploads → status = 'pending'
+- Only principal can approve/reject (RBAC enforced)
+- Rejection requires mandatory rejection_reason
+- Approved content only goes live within start_time and end_time window
+
+5. SCHEDULING/ROTATION LOGIC (MOST IMPORTANT)
+Algorithm is STATELESS and DETERMINISTIC:
+  Step 1: Fetch approved content for teacher within start_time/end_time window
+  Step 2: Group by subject (independent rotation per subject)
+  Step 3: Sort by rotation_order
+  Step 4: totalCycle = SUM of all durations in minutes
+  Step 5: positionInCycle = (Date.now() / 60000) % totalCycle
+  Step 6: Walk through content until positionInCycle < accumulated duration
+  Step 7: That item is currently active
+
+Why Epoch reference?
+  - No DB writes needed
+  - All students see same content simultaneously
+  - Restart-proof, stateless
+
+Edge Cases:
+  - No approved content → return null
+  - Outside time window → filtered by SQL WHERE clause
+  - No start_time/end_time → excluded from live
+  - Invalid teacher/subject → return null (not error)
+
+6. DATABASE DESIGN
+Tables: users, content, content_slots, content_schedule
+- UUIDs as primary keys
+- Transactions used in upload (content + slot + schedule atomically)
+- Foreign key constraints for data integrity
+- status as VARCHAR with application-level validation
+
+7. FOLDER STRUCTURE
+src/
+  controllers/  → HTTP only (parse req, send res)
+  routes/       → Route + middleware chaining
+  services/     → All business logic + DB queries
+  middlewares/  → JWT auth, RBAC, file upload
+  config/       → DB pool
+  utils/        → Response helpers
+
+8. SCALABILITY
+Current: Single Node.js + MySQL + local storage
+Future:
+  - Redis cache on /content/live (60s TTL)
+  - Rate limiting on public API
+  - S3 for file storage + CDN
+  - Read replicas for DB
+  - PM2 cluster mode
